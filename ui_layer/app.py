@@ -20,6 +20,7 @@ from agent_layer.audience_agent import (  # noqa: E402
     PersistentMCPToolClient,
     PipelineError,
 )
+from agent_layer.portfolio_chat import answer_portfolio_question  # noqa: E402
 
 load_dotenv(ROOT_DIR / ".env")
 
@@ -99,6 +100,42 @@ def render_portfolio(portfolio: AudiencePortfolio) -> None:
                                 )
 
 
+def render_portfolio_chat(portfolio: AudiencePortfolio) -> None:
+    """Render Q&A that is limited to the portfolio already on the dashboard."""
+
+    chat_history = st.session_state.setdefault("chat_history", [])
+    with st.expander("Ask about this dashboard"):
+        for turn in chat_history:
+            if turn["role"] == "assistant" and not turn.get("answered", True):
+                st.info(turn["content"])
+            else:
+                with st.chat_message(turn["role"]):
+                    st.markdown(turn["content"])
+
+        question = st.chat_input("Ask a question about the audience segments...")
+        if question:
+            chat_history.append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            result = answer_portfolio_question(
+                question,
+                portfolio.model_dump()["segments"],
+            )
+            chat_history.append(
+                {
+                    "role": "assistant",
+                    "content": result["text"],
+                    "answered": result["answered"],
+                }
+            )
+            if result["answered"]:
+                with st.chat_message("assistant"):
+                    st.markdown(result["text"])
+            else:
+                st.info(result["text"])
+
+
 st.title("InMarket Prototype: Autonomous Audience Trend Miner")
 st.write(
     "Turn the latest processed English Wikipedia traffic into coherent, "
@@ -134,3 +171,8 @@ if st.button("Mine Trends & Generate Audiences", type="primary", use_container_w
 
 if st.session_state.portfolio is not None:
     render_portfolio(st.session_state.portfolio)
+
+if st.session_state.portfolio is not None:
+    render_portfolio_chat(st.session_state.portfolio)
+else:
+    st.caption("Run the pipeline first to ask questions about the results.")

@@ -436,6 +436,136 @@ class AudienceAgentTests(unittest.TestCase):
                 critique, clusters, articles
             )
 
+        completed = AudienceAgent._complete_critique_coverage(critique, clusters)
+        self.assertEqual(len(completed.cross_cluster_overlaps), 1)
+        self.assertEqual(
+            completed.cross_cluster_overlaps[0].article_title,
+            "David Beckham",
+        )
+        AudienceAgent._validate_critique_coverage(completed, clusters, articles)
+
+    def test_missing_critique_reviews_are_conservatively_dropped(self) -> None:
+        clusters = InitialClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name=f"Candidate Theme {index}",
+                    article_titles=[f"Topic {index}"],
+                    rationale="A sufficiently detailed candidate audience rationale for review.",
+                )
+                for index in range(5)
+            ]
+        )
+        articles = [
+            Article(title=f"Topic {index}", views=500 - index * 50)
+            for index in range(5)
+        ]
+        critique = ClusterCritique(
+            needs_refinement=False,
+            overall_assessment="The returned critique accidentally omitted one assignment.",
+            issues=[],
+            placement_reviews=[
+                ArticlePlacementReview(
+                    article_title=f"Topic {index}",
+                    assigned_cluster=f"Candidate Theme {index}",
+                    fit="strong",
+                    recommended_cluster=f"Candidate Theme {index}",
+                    reasoning="The article directly supports the candidate audience theme.",
+                )
+                for index in range(4)
+            ],
+            cross_cluster_overlaps=[],
+        )
+
+        completed = AudienceAgent._complete_critique_coverage(critique, clusters)
+
+        self.assertTrue(completed.needs_refinement)
+        self.assertEqual(len(completed.placement_reviews), 5)
+        fallback = completed.placement_reviews[-1]
+        self.assertEqual(fallback.article_title, "Topic 4")
+        self.assertEqual(fallback.fit, "noise")
+        self.assertEqual(fallback.recommended_cluster, "DROP")
+        AudienceAgent._validate_critique_coverage(completed, clusters, articles)
+
+        refined = RefinedClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="Candidate Theme 4",
+                    article_titles=["Topic 4"],
+                    rationale="A sufficiently detailed candidate audience rationale for review.",
+                )
+            ],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title="Topic 4",
+                    cluster_name="Candidate Theme 4",
+                    primary_relevance="Candidate audience topic",
+                    fit_rationale="The refinement attempted to retain the omitted candidate assignment.",
+                    ambiguity_resolution=(
+                        "The refinement supplied a detailed explanation despite "
+                        "the deterministic DROP recommendation."
+                    ),
+                )
+            ],
+        )
+        pruned = AudienceAgent._prune_unresolved_assignments(refined, completed)
+        self.assertEqual(pruned.clusters, [])
+        self.assertEqual(pruned.placement_decisions, [])
+
+    def test_duplicate_refined_article_keeps_one_placement(self) -> None:
+        refined = RefinedClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="World Cup Historians",
+                    article_titles=["2022 FIFA World Cup"],
+                    rationale="Interest in the history and outcomes of major football tournaments.",
+                ),
+                CandidateCluster(
+                    cluster_name="Football Event Followers",
+                    article_titles=["2022 FIFA World Cup", "UEFA Euro 2024"],
+                    rationale="Interest in major international football events and competitions.",
+                ),
+            ],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title="2022 FIFA World Cup",
+                    cluster_name="World Cup Historians",
+                    primary_relevance="World Cup history",
+                    fit_rationale="This tournament directly supports a historical World Cup audience.",
+                    ambiguity_resolution="Historical tournament interest is the dominant cluster fit.",
+                ),
+                PlacementDecision(
+                    article_title="2022 FIFA World Cup",
+                    cluster_name="Football Event Followers",
+                    primary_relevance="International football event",
+                    fit_rationale="This tournament also relates to international football events.",
+                    ambiguity_resolution="Event interest provides a plausible but secondary cluster fit.",
+                ),
+                PlacementDecision(
+                    article_title="UEFA Euro 2024",
+                    cluster_name="Football Event Followers",
+                    primary_relevance="International football event",
+                    fit_rationale="This tournament directly supports current football event interest.",
+                    ambiguity_resolution="No material ambiguity exists for this event assignment.",
+                ),
+            ],
+        )
+
+        deduplicated = AudienceAgent._deduplicate_refined_assignments(refined)
+
+        assignments = [
+            (cluster.cluster_name, title)
+            for cluster in deduplicated.clusters
+            for title in cluster.article_titles
+        ]
+        self.assertEqual(
+            assignments,
+            [
+                ("World Cup Historians", "2022 FIFA World Cup"),
+                ("Football Event Followers", "UEFA Euro 2024"),
+            ],
+        )
+        self.assertEqual(len(deduplicated.placement_decisions), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

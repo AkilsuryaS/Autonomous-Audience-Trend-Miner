@@ -324,11 +324,13 @@ class AudienceAgent:
             "Critique pass: auditing every placement and cross-cluster overlap",
         )
         critique = await self._critique_pass(articles, initial)
+        critique = self._complete_critique_coverage(critique, initial)
         self._log_pass("CRITIQUE", critique)
         self._validate_critique_coverage(critique, initial, articles)
 
         report("cluster", "Refinement pass: applying the critique once")
         refined = await self._refinement_pass(articles, initial, critique)
+        refined = self._deduplicate_refined_assignments(refined)
         refined = self._prune_unresolved_assignments(refined, critique)
         self._log_pass("REFINEMENT", refined)
         self._validate_refinement(refined, critique, articles)
@@ -609,6 +611,142 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         )
 
     @staticmethod
+    def _complete_critique_coverage(
+        critique: ClusterCritique, candidates: InitialClusterSet
+    ) -> ClusterCritique:
+        """Conservatively fill assignments omitted by the one critique call.
+
+        Structured LLM output can occasionally omit an item from a long review
+        list. A missing review must never crash the pipeline or silently pass as
+        approved, so the deterministic fallback marks it as noise and routes it
+        to ``DROP`` before refinement. This does not add an LLM call or another
+        reasoning iteration.
+        """
+
+        reviewed = {
+            (review.assigned_cluster, review.article_title)
+            for review in critique.placement_reviews
+        }
+        missing = [
+            (cluster.cluster_name, title)
+            for cluster in candidates.clusters
+            for title in cluster.article_titles
+            if (cluster.cluster_name, title) not in reviewed
+        ]
+        if missing:
+            LOGGER.warning(
+                "Critique omitted %s candidate assignments; conservatively "
+                "routing them to DROP: %s",
+                len(missing),
+                missing,
+            )
+        fallback_reviews = [
+            ArticlePlacementReview(
+                article_title=title,
+                assigned_cluster=cluster_name,
+                fit="noise",
+                recommended_cluster="DROP",
+                reasoning=(
+                    "The critique omitted this candidate assignment, so the "
+                    "deterministic guardrail removes it rather than retaining "
+                    "an unaudited topic."
+                ),
+            )
+            for cluster_name, title in missing
+        ]
+
+        assignments_by_title: dict[str, list[str]] = {}
+        for cluster in candidates.clusters:
+            for title in cluster.article_titles:
+                assignments_by_title.setdefault(title, []).append(
+                    cluster.cluster_name
+                )
+
+        overlaps = list(critique.cross_cluster_overlaps)
+        original_overlap_count = len(overlaps)
+        overlap_titles = {overlap.article_title for overlap in overlaps}
+        for title, cluster_names in assignments_by_title.items():
+            if len(cluster_names) < 2 or title in overlap_titles:
+                continue
+            overlaps.append(
+                CrossClusterOverlap(
+                    article_title=title,
+                    current_cluster=cluster_names[0],
+                    competing_cluster=cluster_names[1],
+                    overlap_reason=(
+                        "The generation pass assigned this exact article to "
+                        "multiple candidate clusters."
+                    ),
+                    recommended_resolution=(
+                        "Retain the article in only the single cluster with the "
+                        "strongest thematic fit."
+                    ),
+                )
+            )
+            overlap_titles.add(title)
+
+        for review in [*critique.placement_reviews, *fallback_reviews]:
+            if (
+                review.recommended_cluster
+                in {review.assigned_cluster, "DROP"}
+                or review.article_title in overlap_titles
+            ):
+                continue
+            overlaps.append(
+                CrossClusterOverlap(
+                    article_title=review.article_title,
+                    current_cluster=review.assigned_cluster,
+                    competing_cluster=review.recommended_cluster,
+                    overlap_reason=(
+                        "The placement review identified a stronger competing "
+                        "candidate cluster for this article."
+                    ),
+                    recommended_resolution=(
+                        "Use the recommended competing cluster as the article's "
+                        "single final placement."
+                    ),
+                )
+            )
+            overlap_titles.add(review.article_title)
+
+        added_overlap_count = len(overlaps) - original_overlap_count
+        if added_overlap_count:
+            LOGGER.warning(
+                "Critique omitted %s required overlap records; added deterministic "
+                "resolutions",
+                added_overlap_count,
+            )
+        needs_refinement = bool(
+            critique.needs_refinement
+            or critique.issues
+            or overlaps
+            or any(
+                review.fit != "strong"
+                for review in [
+                    *critique.placement_reviews,
+                    *fallback_reviews,
+                ]
+            )
+        )
+        if (
+            not missing
+            and not added_overlap_count
+            and needs_refinement == critique.needs_refinement
+        ):
+            return critique
+
+        return critique.model_copy(
+            update={
+                "needs_refinement": needs_refinement,
+                "placement_reviews": [
+                    *critique.placement_reviews,
+                    *fallback_reviews,
+                ],
+                "cross_cluster_overlaps": overlaps,
+            }
+        )
+
+    @staticmethod
     def _validate_critique_coverage(
         critique: ClusterCritique,
         candidates: InitialClusterSet,
@@ -851,11 +989,58 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         }
 
     @staticmethod
+    def _deduplicate_refined_assignments(
+        refined: RefinedClusterSet,
+    ) -> RefinedClusterSet:
+        """Keep each article in only its first final cluster placement."""
+
+        seen_titles: set[str] = set()
+        kept_pairs: set[tuple[str, str]] = set()
+        dropped_pairs: list[tuple[str, str]] = []
+        clusters = []
+        for cluster in refined.clusters:
+            titles = []
+            for title in cluster.article_titles:
+                pair = (cluster.cluster_name, title)
+                if title in seen_titles:
+                    dropped_pairs.append(pair)
+                    continue
+                seen_titles.add(title)
+                kept_pairs.add(pair)
+                titles.append(title)
+            if titles:
+                clusters.append(cluster.model_copy(update={"article_titles": titles}))
+
+        seen_decisions: set[tuple[str, str]] = set()
+        decisions = []
+        for decision in refined.placement_decisions:
+            pair = (decision.cluster_name, decision.article_title)
+            if pair not in kept_pairs or pair in seen_decisions:
+                continue
+            seen_decisions.add(pair)
+            decisions.append(decision)
+
+        if dropped_pairs:
+            LOGGER.warning(
+                "Removed %s duplicate final assignments: %s",
+                len(dropped_pairs),
+                dropped_pairs,
+            )
+        return refined.model_copy(
+            update={"clusters": clusters, "placement_decisions": decisions}
+        )
+
+    @staticmethod
     def _prune_unresolved_assignments(
         refined: RefinedClusterSet, critique: ClusterCritique
     ) -> RefinedClusterSet:
         """Conservatively remove flagged placements without a real resolution."""
 
+        dropped_titles = {
+            review.article_title
+            for review in critique.placement_reviews
+            if review.recommended_cluster == "DROP"
+        }
         flagged_titles = {
             review.article_title
             for review in critique.placement_reviews
@@ -866,11 +1051,14 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         unresolved_pairs = {
             (decision.cluster_name, decision.article_title)
             for decision in refined.placement_decisions
-            if decision.article_title in flagged_titles
-            and (
-                len(decision.ambiguity_resolution.strip()) < 20
-                or AudienceAgent._is_generic_ambiguity_resolution(
-                    decision.ambiguity_resolution
+            if decision.article_title in dropped_titles
+            or (
+                decision.article_title in flagged_titles
+                and (
+                    len(decision.ambiguity_resolution.strip()) < 20
+                    or AudienceAgent._is_generic_ambiguity_resolution(
+                        decision.ambiguity_resolution
+                    )
                 )
             )
         }

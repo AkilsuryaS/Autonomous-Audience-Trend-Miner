@@ -46,8 +46,8 @@ The Streamlit resource cache retains a `PersistentMCPToolClient`. That resource 
 The clustering stage is visibly implemented as three separate LLM calls, not one prompt-to-JSON request:
 
 1. **Generation:** create 5-10 initial commercial clusters from exact article titles.
-2. **Critique:** independently audit every article assignment, commercial relevance, semantic cross-cluster overlap, unsupported/misassigned articles, and residual noise. Multi-domain people must receive an explicit competing-cluster review.
-3. **Refinement:** apply that critique exactly once and emit one placement decision per retained article. The deterministic guardrails reject uncovered critique assignments and duplicate placements, remove retained noise, and conservatively drop flagged articles that lack a concrete ambiguity resolution.
+2. **Critique:** independently audit every article assignment, commercial relevance, semantic cross-cluster overlap, unsupported/misassigned articles, and residual noise. Multi-domain people must receive an explicit competing-cluster review. If structured output omits an assignment or a required duplicate-overlap record, a deterministic fallback marks the unaudited item for removal and supplies the missing overlap instruction without making another LLM call.
+3. **Refinement:** apply that critique exactly once and emit one placement decision per retained article. The deterministic guardrails remove retained noise, deduplicate final placements, and conservatively drop flagged articles that lack a concrete ambiguity resolution.
 
 Every pass prints a separately labeled structured payload to the app terminal for debugging and video demonstration. The dashboard also exposes the final article-level decisions in each card's **Placement sanity check** expander. The refined clusters are Pydantic-validated and checked against the original article-title set. Portfolio generation is a fourth, sequential structured-output call. If final parsing or cluster mapping fails, it retries once with stricter formatting instructions.
 
@@ -148,3 +148,19 @@ Serverless functions are possible after adapting the MCP service to stateless HT
 - The MCP server uses request timeouts, a descriptive Wikimedia User-Agent, graceful per-day error handling, and explicit input bounds.
 - Article titles are treated as untrusted data in every LLM prompt and cannot introduce instructions.
 - Structured output, Pydantic models, exact source-title checks, a deterministic size calculation, and a single retry constrain common LLM failure modes.
+
+## Portfolio Q&A Chat
+
+The dashboard chat answers questions only from the already-generated
+`AudiencePortfolio`. It performs no new Wikimedia fetch, clustering pass, or
+tool call. The chat receives a plain copy of the segments already stored in
+Streamlit session state, so it remains separate from the main mining pipeline.
+
+The feature uses two guardrail layers: a free deterministic keyword-overlap
+check before any LLM call, followed by a strict system prompt that permits only
+facts in the supplied segment JSON. If the pre-check allows a question that the
+portfolio cannot actually support, the model must return the fixed refusal:
+`Please ask a question relevant to the dashboard.`
+
+The chat is stateless with respect to the main pipeline and cannot trigger a
+new mining run.
