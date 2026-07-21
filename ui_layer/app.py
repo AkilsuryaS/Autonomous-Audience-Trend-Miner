@@ -66,7 +66,7 @@ def render_portfolio(portfolio: AudiencePortfolio) -> None:
             with column:
                 with st.container(border=True):
                     st.markdown(f"### {segment.audience_name}")
-                    st.write(segment.audience_description)
+                    st.markdown(segment.audience_description)
                     metric_col, power_col = st.columns(2)
                     metric_col.metric(
                         "Size Index", f"{segment.estimated_size_index:.1f}%"
@@ -75,13 +75,28 @@ def render_portfolio(portfolio: AudiencePortfolio) -> None:
                     st.progress(
                         min(max(segment.estimated_size_index / 100, 0.0), 1.0)
                     )
+                    st.divider()
                     st.markdown("**Commercial opportunity**")
                     st.write(buying_power.rationale)
                     st.caption(
-                        "Brand fit: " + " · ".join(buying_power.brand_categories)
+                        "Brand fit — " + " · ".join(buying_power.brand_categories)
                     )
                     with st.expander("Traffic signals"):
                         st.write(" · ".join(segment.source_articles))
+                    with st.expander("Placement sanity check"):
+                        for decision in segment.placement_decisions:
+                            st.markdown(
+                                f"**{decision.article_title}** — "
+                                f"{decision.primary_relevance}"
+                            )
+                            st.caption(decision.fit_rationale)
+                            if not decision.ambiguity_resolution.casefold().startswith(
+                                "no material ambiguity"
+                            ):
+                                st.caption(
+                                    "Overlap resolved: "
+                                    + decision.ambiguity_resolution
+                                )
 
 
 st.title("InMarket Prototype: Autonomous Audience Trend Miner")

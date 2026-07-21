@@ -9,7 +9,8 @@ The application fetches the latest processed English Wikipedia trends, aggregate
 Each audience card includes:
 
 - a market-friendly audience name;
-- a short, traffic-grounded audience description;
+- a two-sentence, stakeholder-friendly brief that names representative traffic
+  signals and explains the cluster's shared interest and brand relevance;
 - an Estimated Size Index calculated as the cluster's article views divided by all views in the fetched trending list; and
 - a High/Medium/Low buying-power assessment with relevant brand categories.
 
@@ -45,10 +46,10 @@ The Streamlit resource cache retains a `PersistentMCPToolClient`. That resource 
 The clustering stage is visibly implemented as three separate LLM calls, not one prompt-to-JSON request:
 
 1. **Generation:** create 5-10 initial commercial clusters from exact article titles.
-2. **Critique:** independently evaluate coherence, commercial relevance, overlap, unsupported/misassigned articles, and residual noise.
-3. **Refinement:** apply that critique exactly once. The call still occurs when the critique passes, in which case it preserves the state and only polishes names or rationales.
+2. **Critique:** independently audit every article assignment, commercial relevance, semantic cross-cluster overlap, unsupported/misassigned articles, and residual noise. Multi-domain people must receive an explicit competing-cluster review.
+3. **Refinement:** apply that critique exactly once and emit one placement decision per retained article. The deterministic guardrails reject uncovered critique assignments and duplicate placements, remove retained noise, and conservatively drop flagged articles that lack a concrete ambiguity resolution.
 
-Every pass prints a separately labeled structured payload to the app terminal for debugging and video demonstration. The refined clusters are Pydantic-validated and checked against the original article-title set. Portfolio generation is a fourth, sequential structured-output call. If final parsing or cluster mapping fails, it retries once with stricter formatting instructions.
+Every pass prints a separately labeled structured payload to the app terminal for debugging and video demonstration. The dashboard also exposes the final article-level decisions in each card's **Placement sanity check** expander. The refined clusters are Pydantic-validated and checked against the original article-title set. Portfolio generation is a fourth, sequential structured-output call. If final parsing or cluster mapping fails, it retries once with stricter formatting instructions.
 
 This fixed pipeline is intentionally deterministic: the LLM does not decide whether to fetch again, critique again, or call an unrelated tool. That keeps the demo debuggable, limits cost, and makes the assignment's clustering/critique loop unambiguous.
 
@@ -113,6 +114,12 @@ python -m compileall agent_layer mcp_server ui_layer tests
 ```
 
 An end-to-end run additionally requires network access to Wikimedia and a valid `OPENAI_API_KEY`.
+
+For a terminal-only demonstration that prints every reasoning state and the final portfolio:
+
+```bash
+python -u scripts/run_pipeline.py
+```
 
 ## Known limitations
 

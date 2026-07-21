@@ -5,6 +5,7 @@ import unittest
 
 from agent_layer.audience_agent import (
     Article,
+    ArticlePlacementReview,
     AudienceAgent,
     AudiencePortfolio,
     AudienceSegment,
@@ -12,8 +13,11 @@ from agent_layer.audience_agent import (
     CandidateCluster,
     ClusterCritique,
     ClusterSet,
+    CrossClusterOverlap,
     InitialClusterSet,
+    PlacementDecision,
     PipelineValidationError,
+    RefinedClusterSet,
 )
 
 
@@ -112,27 +116,78 @@ class AudienceAgentTests(unittest.TestCase):
             article_titles=["Solar panel", "Heat pump"],
             rationale="Shared interest in practical residential energy upgrades.",
         )
+        pipeline_articles = self.articles + [
+            Article(title="Electric bicycle", views=100),
+            Article(title="Home battery", views=100),
+            Article(title="Recycling", views=100),
+        ]
         initial_clusters = InitialClusterSet(
             clusters=[
                 cluster,
-                cluster.model_copy(update={"cluster_name": "Green Transport Explorers"}),
-                cluster.model_copy(update={"cluster_name": "Sustainable Tech Researchers"}),
-                cluster.model_copy(update={"cluster_name": "Energy Cost Optimizers"}),
-                cluster.model_copy(update={"cluster_name": "Climate Conscious Consumers"}),
+                CandidateCluster(
+                    cluster_name="Entertainment Launch Followers",
+                    article_titles=["Film premiere"],
+                    rationale="Interest in upcoming entertainment releases and launch moments.",
+                ),
+                CandidateCluster(
+                    cluster_name="Green Transport Explorers",
+                    article_titles=["Electric bicycle"],
+                    rationale="Interest in lower-emission personal transportation choices.",
+                ),
+                CandidateCluster(
+                    cluster_name="Energy Cost Optimizers",
+                    article_titles=["Home battery"],
+                    rationale="Interest in technology that changes household energy economics.",
+                ),
+                CandidateCluster(
+                    cluster_name="Climate Conscious Consumers",
+                    article_titles=["Recycling"],
+                    rationale="Interest in lower-waste habits and circular consumer behavior.",
+                ),
             ]
         )
-        refined_clusters = ClusterSet(clusters=[cluster])
+        placement_reviews = [
+            ArticlePlacementReview(
+                article_title=title,
+                assigned_cluster=candidate.cluster_name,
+                fit="strong",
+                recommended_cluster=candidate.cluster_name,
+                reasoning="The article has a direct and commercially coherent fit with this theme.",
+            )
+            for candidate in initial_clusters.clusters
+            for title in candidate.article_titles
+        ]
+        refined_clusters = RefinedClusterSet(
+            clusters=[cluster],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title=title,
+                    cluster_name=cluster.cluster_name,
+                    primary_relevance="Residential energy upgrades",
+                    fit_rationale="The topic directly represents a practical household efficiency investment.",
+                    ambiguity_resolution="No material ambiguity exists for this household upgrade topic.",
+                )
+                for title in cluster.article_titles
+            ],
+        )
         critique = ClusterCritique(
             needs_refinement=False,
             overall_assessment="The candidate is coherent and commercially actionable.",
             issues=[],
+            placement_reviews=placement_reviews,
+            cross_cluster_overlaps=[],
         )
         portfolio = AudiencePortfolio(
             segments=[
                 AudienceSegment(
                     source_cluster_name="Eco Home Upgraders",
                     audience_name="Efficient Home Optimizers",
-                    audience_description="Rising reading around two energy upgrades signals active home-efficiency curiosity.",
+                    audience_description=(
+                        "Rising Wikipedia traffic around Solar panel and Heat pump signals "
+                        "fresh attention on practical home-efficiency upgrades. This audience "
+                        "shares an interest in reducing household energy use, making it relevant "
+                        "to HVAC, renewable-energy, and home-improvement brands."
+                    ),
                     estimated_size_index=1.0,
                     potential_buying_power=BuyingPowerAssessment(
                         level="High",
@@ -140,6 +195,7 @@ class AudienceAgentTests(unittest.TestCase):
                         brand_categories=["HVAC", "Solar installers"],
                     ),
                     source_articles=["Solar panel", "Heat pump"],
+                    placement_decisions=refined_clusters.placement_decisions,
                 )
             ]
         )
@@ -147,7 +203,7 @@ class AudienceAgentTests(unittest.TestCase):
             [initial_clusters, critique, refined_clusters, portfolio]
         )
         fake_mcp = FakeMCPClient(
-            [article.model_dump() for article in self.articles]
+            [article.model_dump() for article in pipeline_articles]
         )
         agent = AudienceAgent(fake_mcp, llm=fake_llm)  # type: ignore[arg-type]
 
@@ -159,11 +215,11 @@ class AudienceAgentTests(unittest.TestCase):
             [
                 "InitialClusterSet",
                 "ClusterCritique",
-                "ClusterSet",
+                "RefinedClusterSet",
                 "AudiencePortfolio",
             ],
         )
-        self.assertEqual(result.segments[0].estimated_size_index, 90.0)
+        self.assertEqual(result.segments[0].estimated_size_index, 69.2)
 
     def test_duplicate_article_assignment_fails_validation(self) -> None:
         clusters = ClusterSet(
@@ -189,14 +245,31 @@ class AudienceAgentTests(unittest.TestCase):
             article_titles=["Solar panel", "Heat pump"],
             rationale="Shared interest in practical residential energy upgrades.",
         )
-        refined = ClusterSet(clusters=[cluster])
+        refined = RefinedClusterSet(
+            clusters=[cluster],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title=title,
+                    cluster_name=cluster.cluster_name,
+                    primary_relevance="Residential energy upgrades",
+                    fit_rationale="The topic directly represents a practical household efficiency investment.",
+                    ambiguity_resolution="No material ambiguity exists for this household upgrade topic.",
+                )
+                for title in cluster.article_titles
+            ],
+        )
         metrics = AudienceAgent._cluster_metrics(refined, self.articles)
         portfolio = AudiencePortfolio(
             segments=[
                 AudienceSegment(
                     source_cluster_name="Eco Home Upgraders",
                     audience_name="Efficient Home Optimizers",
-                    audience_description="Rising reading around energy upgrades signals active efficiency curiosity.",
+                    audience_description=(
+                        "Rising Wikipedia traffic around Solar panel and Heat pump signals "
+                        "fresh attention on practical home-efficiency upgrades. This audience "
+                        "shares an interest in reducing household energy use, making it relevant "
+                        "to HVAC, renewable-energy, and home-improvement brands."
+                    ),
                     estimated_size_index=90.0,
                     potential_buying_power=BuyingPowerAssessment(
                         level="High",
@@ -204,6 +277,7 @@ class AudienceAgentTests(unittest.TestCase):
                         brand_categories=["HVAC", "Solar installers"],
                     ),
                     source_articles=["Solar panel", "Heat pump"],
+                    placement_decisions=refined.placement_decisions,
                 )
             ]
         )
@@ -214,6 +288,153 @@ class AudienceAgentTests(unittest.TestCase):
 
         self.assertEqual(result, portfolio)
         self.assertEqual(len(fake_llm.invocations), 2)
+
+    def test_flagged_cross_cluster_article_requires_resolution(self) -> None:
+        articles = [
+            Article(title="David Beckham", views=500),
+            Article(title="Zendaya", views=400),
+            Article(title="Association football", views=300),
+        ]
+        clusters = [
+            CandidateCluster(
+                cluster_name="Pop Culture Aficionados",
+                article_titles=["David Beckham", "Zendaya"],
+                rationale="Interest in widely recognized entertainment and celebrity figures.",
+            ),
+            CandidateCluster(
+                cluster_name="Football Enthusiasts",
+                article_titles=["Association football"],
+                rationale="Interest in professional football personalities and competitions.",
+            ),
+        ]
+        critique = ClusterCritique(
+            needs_refinement=True,
+            overall_assessment="A cross-domain sports celebrity needs a dominant placement.",
+            issues=[],
+            placement_reviews=[
+                ArticlePlacementReview(
+                    article_title="David Beckham",
+                    assigned_cluster="Pop Culture Aficionados",
+                    fit="weak",
+                    recommended_cluster="Football Enthusiasts",
+                    reasoning="His defining professional domain creates a stronger football audience signal.",
+                )
+            ],
+            cross_cluster_overlaps=[
+                CrossClusterOverlap(
+                    article_title="David Beckham",
+                    current_cluster="Pop Culture Aficionados",
+                    competing_cluster="Football Enthusiasts",
+                    overlap_reason="He has both celebrity visibility and a defining professional football identity.",
+                    recommended_resolution="Use football as the dominant theme and avoid counting broad fame twice.",
+                )
+            ],
+        )
+        unresolved = RefinedClusterSet(
+            clusters=clusters,
+            placement_decisions=[
+                PlacementDecision(
+                    article_title="David Beckham",
+                    cluster_name="Pop Culture Aficionados",
+                    primary_relevance="Celebrity culture",
+                    fit_rationale="He is a globally visible public figure with entertainment relevance.",
+                    ambiguity_resolution="No material ambiguity",
+                ),
+                PlacementDecision(
+                    article_title="Zendaya",
+                    cluster_name="Pop Culture Aficionados",
+                    primary_relevance="Film and celebrity culture",
+                    fit_rationale="Her primary public relevance directly supports this entertainment theme.",
+                    ambiguity_resolution="No material ambiguity exists for this entertainment figure.",
+                ),
+                PlacementDecision(
+                    article_title="Association football",
+                    cluster_name="Football Enthusiasts",
+                    primary_relevance="Professional sport",
+                    fit_rationale="The topic directly represents the core interest of the football audience.",
+                    ambiguity_resolution="No material ambiguity exists for this professional sports topic.",
+                ),
+            ],
+        )
+
+        with self.assertRaisesRegex(PipelineValidationError, "ambiguity"):
+            AudienceAgent._validate_refinement(unresolved, critique, articles)
+
+        pruned = AudienceAgent._prune_unresolved_assignments(unresolved, critique)
+        self.assertNotIn(
+            "David Beckham",
+            [title for cluster in pruned.clusters for title in cluster.article_titles],
+        )
+        AudienceAgent._validate_refinement(pruned, critique, articles)
+
+        resolved = unresolved.model_copy(
+            update={
+                "clusters": [
+                    clusters[0].model_copy(update={"article_titles": ["Zendaya"]}),
+                    clusters[1].model_copy(
+                        update={
+                            "article_titles": ["Association football", "David Beckham"]
+                        }
+                    ),
+                ],
+                "placement_decisions": [
+                    decision
+                    for decision in unresolved.placement_decisions
+                    if decision.article_title != "David Beckham"
+                ]
+                + [
+                    PlacementDecision(
+                        article_title="David Beckham",
+                        cluster_name="Football Enthusiasts",
+                        primary_relevance="Professional football",
+                        fit_rationale="His defining career and strongest domain relevance align with football audiences.",
+                        ambiguity_resolution="Football is the dominant fit; celebrity visibility is secondary and is not counted separately.",
+                    )
+                ],
+            }
+        )
+        AudienceAgent._validate_refinement(resolved, critique, articles)
+
+    def test_critique_must_flag_exact_cross_cluster_duplicates(self) -> None:
+        clusters = InitialClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name=f"Candidate Theme {index}",
+                    article_titles=["David Beckham" if index < 2 else f"Topic {index}"],
+                    rationale="A sufficiently detailed candidate audience rationale for review.",
+                )
+                for index in range(5)
+            ]
+        )
+        articles = [
+            Article(title="David Beckham", views=500),
+            Article(title="Topic 2", views=300),
+            Article(title="Topic 3", views=200),
+            Article(title="Topic 4", views=100),
+        ]
+        reviews = [
+            ArticlePlacementReview(
+                article_title=title,
+                assigned_cluster=cluster.cluster_name,
+                fit="strong",
+                recommended_cluster=cluster.cluster_name,
+                reasoning="The article appears to fit this candidate theme at initial review.",
+            )
+            for cluster in clusters.clusters
+            for title in cluster.article_titles
+        ]
+        critique = ClusterCritique(
+            needs_refinement=False,
+            overall_assessment="No overlap was reported despite duplicate placement.",
+            issues=[],
+            placement_reviews=reviews,
+            cross_cluster_overlaps=[],
+        )
+
+        with self.assertRaisesRegex(PipelineValidationError, "duplicates"):
+            AudienceAgent._validate_critique_coverage(
+                critique, clusters, articles
+            )
 
 
 if __name__ == "__main__":
