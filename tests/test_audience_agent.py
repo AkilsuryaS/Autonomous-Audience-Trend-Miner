@@ -566,6 +566,198 @@ class AudienceAgentTests(unittest.TestCase):
         )
         self.assertEqual(len(deduplicated.placement_decisions), 2)
 
+    def test_conflicting_critique_labels_are_normalized(self) -> None:
+        clusters = InitialClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name=f"Candidate Theme {index}",
+                    article_titles=[f"Topic {index}"],
+                    rationale="A sufficiently detailed candidate audience rationale for review.",
+                )
+                for index in range(5)
+            ]
+        )
+        articles = [
+            Article(title=f"Topic {index}", views=500 - index * 50)
+            for index in range(5)
+        ]
+        reviews = [
+            ArticlePlacementReview(
+                article_title="Topic 0",
+                assigned_cluster="Candidate Theme 0",
+                fit="strong",
+                recommended_cluster="Candidate Theme 1",
+                reasoning="A stronger competing cluster was identified for this article.",
+            ),
+            ArticlePlacementReview(
+                article_title="Topic 1",
+                assigned_cluster="Candidate Theme 1",
+                fit="noise",
+                recommended_cluster="Candidate Theme 1",
+                reasoning="The label and recommendation contradict one another.",
+            ),
+            ArticlePlacementReview(
+                article_title="Topic 2",
+                assigned_cluster="Candidate Theme 2",
+                fit="misassigned",
+                recommended_cluster="Candidate Theme 2",
+                reasoning="The label and recommendation contradict one another.",
+            ),
+            ArticlePlacementReview(
+                article_title="Topic 3",
+                assigned_cluster="Candidate Theme 3",
+                fit="strong",
+                recommended_cluster="Invented Theme",
+                reasoning="The recommendation does not match a real candidate cluster.",
+            ),
+            ArticlePlacementReview(
+                article_title="Topic 4",
+                assigned_cluster="Candidate Theme 4",
+                fit="strong",
+                recommended_cluster="Candidate Theme 4",
+                reasoning="The article directly supports the candidate audience theme.",
+            ),
+        ]
+        critique = ClusterCritique(
+            needs_refinement=False,
+            overall_assessment="Several structured labels conflict with recommendations.",
+            issues=[],
+            placement_reviews=reviews,
+            cross_cluster_overlaps=[],
+        )
+
+        normalized = AudienceAgent._complete_critique_coverage(critique, clusters)
+        by_title = {
+            review.article_title: review for review in normalized.placement_reviews
+        }
+
+        self.assertEqual(by_title["Topic 0"].fit, "misassigned")
+        self.assertEqual(by_title["Topic 1"].fit, "weak")
+        self.assertEqual(by_title["Topic 2"].fit, "weak")
+        self.assertEqual(by_title["Topic 3"].fit, "noise")
+        self.assertEqual(by_title["Topic 3"].recommended_cluster, "DROP")
+        self.assertTrue(normalized.needs_refinement)
+        self.assertEqual(len(normalized.cross_cluster_overlaps), 1)
+        AudienceAgent._validate_critique_coverage(
+            normalized, clusters, articles
+        )
+
+    def test_vague_people_catchall_is_removed_after_refinement(self) -> None:
+        refined = RefinedClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="Celebrity and Public Figures",
+                    article_titles=["Zendaya", "Mitch McConnell"],
+                    rationale=(
+                        "Interest in recognizable people from entertainment and public life."
+                    ),
+                ),
+                CandidateCluster(
+                    cluster_name="Film and TV Buffs",
+                    article_titles=["The Odyssey"],
+                    rationale="Interest in upcoming film and television entertainment releases.",
+                ),
+            ],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title="Zendaya",
+                    cluster_name="Celebrity and Public Figures",
+                    primary_relevance="Notable public figure",
+                    fit_rationale="The person is widely recognized by entertainment audiences.",
+                    ambiguity_resolution="The model used broad fame as the cluster boundary.",
+                ),
+                PlacementDecision(
+                    article_title="Mitch McConnell",
+                    cluster_name="Celebrity and Public Figures",
+                    primary_relevance="Notable public figure",
+                    fit_rationale="The person is widely recognized by current-events audiences.",
+                    ambiguity_resolution="The model used broad fame as the cluster boundary.",
+                ),
+                PlacementDecision(
+                    article_title="The Odyssey",
+                    cluster_name="Film and TV Buffs",
+                    primary_relevance="Upcoming film",
+                    fit_rationale="The title directly supports interest in forthcoming cinema releases.",
+                    ambiguity_resolution="No material ambiguity exists for this film assignment.",
+                ),
+            ],
+        )
+
+        pruned = AudienceAgent._prune_vague_people_clusters(refined)
+
+        self.assertEqual(
+            [cluster.cluster_name for cluster in pruned.clusters],
+            ["Film and TV Buffs"],
+        )
+        self.assertEqual(
+            [decision.article_title for decision in pruned.placement_decisions],
+            ["The Odyssey"],
+        )
+
+    def test_vague_role_is_removed_from_specific_cluster(self) -> None:
+        refined = RefinedClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="Cinephiles and TV Buffs",
+                    article_titles=["Zendaya", "The Odyssey"],
+                    rationale="Interest in actors and upcoming screen entertainment releases.",
+                )
+            ],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title="Zendaya",
+                    cluster_name="Cinephiles and TV Buffs",
+                    primary_relevance="Public figure",
+                    fit_rationale="The person is broadly known to entertainment audiences.",
+                    ambiguity_resolution="The explanation does not identify a specific professional role.",
+                ),
+                PlacementDecision(
+                    article_title="The Odyssey",
+                    cluster_name="Cinephiles and TV Buffs",
+                    primary_relevance="Upcoming film",
+                    fit_rationale="The title directly supports interest in forthcoming cinema releases.",
+                    ambiguity_resolution="No material ambiguity exists for this film assignment.",
+                ),
+            ],
+        )
+
+        pruned = AudienceAgent._prune_vague_people_clusters(refined)
+
+        self.assertEqual(pruned.clusters[0].article_titles, ["The Odyssey"])
+        self.assertEqual(len(pruned.placement_decisions), 1)
+
+    def test_refinement_decisions_follow_uniquely_renamed_clusters(self) -> None:
+        refined = RefinedClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="Mixed Martial Arts Fans",
+                    article_titles=["Conor McGregor", "Max Holloway"],
+                    rationale="Interest in professional mixed martial arts competitors and events.",
+                )
+            ],
+            placement_decisions=[
+                PlacementDecision(
+                    article_title=title,
+                    cluster_name="Athletes and Sports Figures",
+                    primary_relevance="Mixed martial artist",
+                    fit_rationale="The athlete's primary professional domain is mixed martial arts.",
+                    ambiguity_resolution="Mixed martial arts is the specific dominant fit, not broad sports fame.",
+                )
+                for title in ["Conor McGregor", "Max Holloway"]
+            ],
+        )
+
+        aligned = AudienceAgent._align_refinement_decisions(refined)
+
+        self.assertEqual(
+            [decision.cluster_name for decision in aligned.placement_decisions],
+            ["Mixed Martial Arts Fans", "Mixed Martial Arts Fans"],
+        )
+        self.assertEqual(
+            aligned.clusters[0].article_titles,
+            ["Conor McGregor", "Max Holloway"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
