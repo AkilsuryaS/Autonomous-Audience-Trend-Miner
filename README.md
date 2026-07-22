@@ -1,4 +1,4 @@
-# InMarket Prototype: Autonomous Audience Trend Miner
+Autonomous Audience Trend Miner
 
 This prototype turns public Wikipedia Pageviews into an **Emerging Audience Portfolio** for brand marketers. It is modeled on the way a company such as InMarket packages broad behavioral signals into coherent, sellable audience segments, while making an important distinction: Wikipedia traffic is an aggregate interest signal, not individual-level identity or purchase-intent data.
 
