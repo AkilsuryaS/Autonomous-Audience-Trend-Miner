@@ -1,6 +1,6 @@
-Autonomous Audience Trend Miner
+# Autonomous Audience Trend Miner
 
-This prototype turns public Wikipedia Pageviews into an **Emerging Audience Portfolio** for brand marketers. It is modeled on the way a company such as InMarket packages broad behavioral signals into coherent, sellable audience segments, while making an important distinction: Wikipedia traffic is an aggregate interest signal, not individual-level identity or purchase-intent data.
+This prototype turns public Wikipedia Pageviews into an **Emerging Audience Portfolio** for brand marketers. It mirrors how ad-tech and marketing platforms package broad behavioral signals into coherent, sellable audience segments, while making an important distinction: Wikipedia traffic is an aggregate interest signal, not individual-level identity or purchase-intent data.
 
 The application fetches the latest processed English Wikipedia trends, aggregates seven days of traffic, removes obvious utility-page noise, and asks `gpt-4o-mini` to discover commercially meaningful themes. A fixed generation → critique → refinement loop makes the reasoning visible and cost-bounded before a final LLM call writes the market-facing portfolio.
 
@@ -95,6 +95,21 @@ This fixed pipeline is intentionally deterministic: the LLM does not decide whet
 └── README.md
 ```
 
+## What you need before running
+
+Three pieces make up the app, and only two of them need a command from you:
+
+| Piece | What it is | How it starts |
+|---|---|---|
+| MCP data service (`mcp_server/`) | Wraps the Wikimedia Pageviews API | Started **automatically** by the FastAPI backend over stdio — no separate command or terminal |
+| FastAPI backend (`api_layer/`) | Runs the agent pipeline, serves WebSocket/REST | `uvicorn api_layer.main:app --reload` |
+| React frontend (`frontend/`) | Dashboard UI | `npm run dev` (or served by Nginx via Docker) |
+
+You need exactly one API key to run this app:
+
+- **Wikimedia Pageviews API** — public and unauthenticated. No key, no signup, no `.env` entry needed.
+- **OpenAI API** — required for `gpt-4o-mini`. Obtain a key at platform.openai.com and set it as `OPENAI_API_KEY` in `.env` (steps below).
+
 ## Setup
 
 Python 3.11 or newer and Node.js 20 or newer are recommended.
@@ -127,7 +142,8 @@ VITE_API_BASE_URL=http://localhost:8000
 Docker Compose builds the React application, installs the Python service, and
 starts both Uvicorn and Nginx inside one container. Nginx serves the compiled
 frontend on port `5173` and proxies both REST and WebSocket requests to FastAPI;
-FastAPI then spawns the MCP server internally over stdio.
+FastAPI then spawns the MCP server internally over stdio — this is the same
+automatic startup described above, so there is no separate MCP command here either.
 
 After creating `.env` and adding your real `OPENAI_API_KEY`, run from the
 repository root:
