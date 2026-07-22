@@ -436,6 +436,76 @@ class AudienceAgentTests(unittest.TestCase):
                 critique, clusters, articles
             )
 
+    def test_missing_critique_assignment_is_conservatively_completed(self) -> None:
+        clusters = InitialClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name="Football Followers",
+                    article_titles=["Lamine Yamal"],
+                    rationale="Interest in leading football players and major competitions.",
+                ),
+                CandidateCluster(
+                    cluster_name="Cultural and Historical Figures",
+                    article_titles=["Lamine Yamal"],
+                    rationale="Interest in prominent public figures and their wider influence.",
+                ),
+                CandidateCluster(
+                    cluster_name="Film Release Trackers",
+                    article_titles=["Film premiere"],
+                    rationale="Interest in upcoming entertainment launches and new releases.",
+                ),
+                CandidateCluster(
+                    cluster_name="Eco Home Upgraders",
+                    article_titles=["Solar panel"],
+                    rationale="Interest in practical residential renewable-energy upgrades.",
+                ),
+                CandidateCluster(
+                    cluster_name="Efficient Heating Shoppers",
+                    article_titles=["Heat pump"],
+                    rationale="Interest in efficient household heating equipment and upgrades.",
+                ),
+            ]
+        )
+        articles = self.articles + [Article(title="Lamine Yamal", views=500)]
+        reviews = [
+            ArticlePlacementReview(
+                article_title=title,
+                assigned_cluster=cluster.cluster_name,
+                fit="strong",
+                recommended_cluster=cluster.cluster_name,
+                reasoning="The article has a direct and commercially coherent fit with this theme.",
+            )
+            for cluster in clusters.clusters
+            for title in cluster.article_titles
+            if cluster.cluster_name != "Cultural and Historical Figures"
+        ]
+        critique = ClusterCritique(
+            needs_refinement=False,
+            overall_assessment="The returned critique accidentally omitted one assignment.",
+            issues=[],
+            placement_reviews=reviews,
+            cross_cluster_overlaps=[],
+        )
+
+        completed = AudienceAgent._complete_critique_coverage(critique, clusters)
+
+        missing_review = next(
+            review
+            for review in completed.placement_reviews
+            if review.assigned_cluster == "Cultural and Historical Figures"
+        )
+        self.assertEqual(missing_review.article_title, "Lamine Yamal")
+        self.assertEqual(missing_review.fit, "weak")
+        self.assertEqual(missing_review.recommended_cluster, "DROP")
+        self.assertTrue(completed.needs_refinement)
+        self.assertIn(
+            "Lamine Yamal",
+            [overlap.article_title for overlap in completed.cross_cluster_overlaps],
+        )
+        AudienceAgent._validate_critique_coverage(
+            completed, clusters, articles
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
