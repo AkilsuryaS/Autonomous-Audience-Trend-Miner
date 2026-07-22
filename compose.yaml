@@ -1,0 +1,14 @@
+services:
+  audience-miner:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: http://localhost:5173
+    ports:
+      - "5173:5173"
+    env_file:
+      - .env
+    environment:
+      FRONTEND_ORIGIN: http://localhost:5173
+      PYTHONUNBUFFERED: "1"
+    init: true
