@@ -632,19 +632,54 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         )
         expected = set(expected_in_order)
 
+        candidate_names = {cluster.cluster_name for cluster in candidates.clusters}
+        allowed_destinations = candidate_names | {"DROP"}
         fit_priority = {"strong": 0, "weak": 1, "misassigned": 2, "noise": 3}
         reviews_by_assignment: dict[tuple[str, str], ArticlePlacementReview] = {}
         duplicate_review_count = 0
-        for review in critique.placement_reviews:
-            key = (review.assigned_cluster, review.article_title)
+        semantic_repair_count = 0
+        for raw_review in critique.placement_reviews:
+            key = (raw_review.assigned_cluster, raw_review.article_title)
             if key not in expected:
                 continue
+            fit = raw_review.fit
+            recommendation = raw_review.recommended_cluster
+
+            if recommendation not in allowed_destinations:
+                recommendation = (
+                    raw_review.assigned_cluster if fit == "strong" else "DROP"
+                )
+
+            # The destination carries the more actionable signal. Reconcile the
+            # categorical label to it instead of failing the entire pipeline.
+            if fit == "strong" and recommendation != raw_review.assigned_cluster:
+                fit = "noise" if recommendation == "DROP" else "misassigned"
+            elif fit == "noise" and recommendation != "DROP":
+                recommendation = "DROP"
+            elif fit == "misassigned" and recommendation == raw_review.assigned_cluster:
+                fit = "weak"
+                recommendation = "DROP"
+
+            review = raw_review.model_copy(
+                update={"fit": fit, "recommended_cluster": recommendation}
+            )
+            if review != raw_review:
+                semantic_repair_count += 1
+
             current = reviews_by_assignment.get(key)
             if current is None:
                 reviews_by_assignment[key] = review
                 continue
             duplicate_review_count += 1
-            if fit_priority[review.fit] > fit_priority[current.fit]:
+            review_rank = (
+                fit_priority[review.fit],
+                int(review.recommended_cluster == "DROP"),
+            )
+            current_rank = (
+                fit_priority[current.fit],
+                int(current.recommended_cluster == "DROP"),
+            )
+            if review_rank > current_rank:
                 reviews_by_assignment[key] = review
 
         missing = [key for key in expected_in_order if key not in reviews_by_assignment]
@@ -659,6 +694,11 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
                 "them weak with a DROP recommendation: %s",
                 len(missing),
                 missing,
+            )
+        if semantic_repair_count:
+            LOGGER.warning(
+                "Normalized %s inconsistent critique label/recommendation pairs",
+                semantic_repair_count,
             )
 
         for cluster_name, title in missing:
@@ -681,8 +721,54 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         for cluster_name, title in expected_in_order:
             assignments_by_title.setdefault(title, []).append(cluster_name)
 
-        overlaps = list(critique.cross_cluster_overlaps)
+        overlaps: list[CrossClusterOverlap] = []
+        seen_overlaps: set[tuple[str, str, str]] = set()
+        invalid_overlap_count = 0
+        for overlap in critique.cross_cluster_overlaps:
+            overlap_key = (
+                overlap.current_cluster,
+                overlap.article_title,
+                overlap.competing_cluster,
+            )
+            if (
+                (overlap.current_cluster, overlap.article_title) not in expected
+                or overlap.competing_cluster not in allowed_destinations
+                or overlap.competing_cluster == overlap.current_cluster
+            ):
+                invalid_overlap_count += 1
+                continue
+            if overlap_key in seen_overlaps:
+                continue
+            seen_overlaps.add(overlap_key)
+            overlaps.append(overlap)
+
         overlap_titles = {overlap.article_title for overlap in overlaps}
+
+        # A recommendation to move an article is itself evidence of a semantic
+        # overlap, even when the model forgot the parallel overlap record.
+        for review in normalized_reviews:
+            if review.recommended_cluster in {
+                review.assigned_cluster,
+                "DROP",
+            } or review.article_title in overlap_titles:
+                continue
+            overlaps.append(
+                CrossClusterOverlap(
+                    article_title=review.article_title,
+                    current_cluster=review.assigned_cluster,
+                    competing_cluster=review.recommended_cluster,
+                    overlap_reason=(
+                        "The critique recommended a different candidate cluster, "
+                        "which establishes a semantic cross-cluster conflict."
+                    ),
+                    recommended_resolution=(
+                        "Refinement must choose the recommended dominant theme and "
+                        "retain this article in no more than one final cluster."
+                    ),
+                )
+            )
+            overlap_titles.add(review.article_title)
+
         for title, cluster_names in assignments_by_title.items():
             if len(cluster_names) < 2 or title in overlap_titles:
                 continue
@@ -701,22 +787,41 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
                     ),
                 )
             )
+            overlap_titles.add(title)
 
-        if not missing and not duplicate_review_count and len(overlaps) == len(
-            critique.cross_cluster_overlaps
-        ):
+        has_findings = bool(
+            critique.issues
+            or overlaps
+            or any(review.fit != "strong" for review in normalized_reviews)
+        )
+        changed = bool(
+            missing
+            or duplicate_review_count
+            or semantic_repair_count
+            or invalid_overlap_count
+            or len(overlaps) != len(critique.cross_cluster_overlaps)
+        )
+        if not changed and critique.needs_refinement == has_findings:
             return critique
 
         assessment = critique.overall_assessment
+        repairs = []
         if missing:
-            assessment += (
-                f" A deterministic guardrail marked {len(missing)} omitted "
-                "assignment(s) weak and recommended DROP."
+            repairs.append(f"completed {len(missing)} omitted assignment(s)")
+        if duplicate_review_count:
+            repairs.append(f"collapsed {duplicate_review_count} repeated review(s)")
+        if semantic_repair_count:
+            repairs.append(
+                f"normalized {semantic_repair_count} label/recommendation conflict(s)"
             )
+        if invalid_overlap_count:
+            repairs.append(f"removed {invalid_overlap_count} invalid overlap(s)")
+        if repairs:
+            assessment += " Deterministic guardrails " + ", ".join(repairs) + "."
 
         return critique.model_copy(
             update={
-                "needs_refinement": True,
+                "needs_refinement": critique.needs_refinement or has_findings,
                 "overall_assessment": assessment,
                 "placement_reviews": normalized_reviews,
                 "cross_cluster_overlaps": overlaps,

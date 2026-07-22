@@ -506,6 +506,97 @@ class AudienceAgentTests(unittest.TestCase):
             completed, clusters, articles
         )
 
+    def test_critique_label_conflicts_are_normalized_before_validation(self) -> None:
+        titles = [
+            "List of FIFA World Cup top goalscorers",
+            "Topic one",
+            "Topic two",
+            "Topic three",
+            "Topic four",
+        ]
+        clusters = InitialClusterSet(
+            clusters=[
+                CandidateCluster(
+                    cluster_name=f"Candidate Audience {index}",
+                    article_titles=[title],
+                    rationale="A sufficiently detailed commercial audience rationale.",
+                )
+                for index, title in enumerate(titles)
+            ]
+        )
+        articles = [
+            Article(title=title, views=500 - index * 50)
+            for index, title in enumerate(titles)
+        ]
+        reviews = [
+            ArticlePlacementReview(
+                article_title=titles[0],
+                assigned_cluster="Candidate Audience 0",
+                fit="strong",
+                recommended_cluster="Candidate Audience 1",
+                reasoning="This was labeled strong despite recommending a different cluster.",
+            ),
+            ArticlePlacementReview(
+                article_title=titles[1],
+                assigned_cluster="Candidate Audience 1",
+                fit="strong",
+                recommended_cluster="DROP",
+                reasoning="This was labeled strong despite recommending that it be dropped.",
+            ),
+            ArticlePlacementReview(
+                article_title=titles[2],
+                assigned_cluster="Candidate Audience 2",
+                fit="noise",
+                recommended_cluster="Candidate Audience 2",
+                reasoning="This noise label incorrectly retained the original destination.",
+            ),
+            ArticlePlacementReview(
+                article_title=titles[3],
+                assigned_cluster="Candidate Audience 3",
+                fit="misassigned",
+                recommended_cluster="Candidate Audience 3",
+                reasoning="This misassigned label incorrectly recommended the same cluster.",
+            ),
+            ArticlePlacementReview(
+                article_title=titles[4],
+                assigned_cluster="Candidate Audience 4",
+                fit="weak",
+                recommended_cluster="Invented Audience",
+                reasoning="This weak review recommended a cluster outside the candidate state.",
+            ),
+        ]
+        critique = ClusterCritique(
+            needs_refinement=False,
+            overall_assessment="The model returned several inconsistent review labels.",
+            issues=[],
+            placement_reviews=reviews,
+            cross_cluster_overlaps=[],
+        )
+
+        normalized = AudienceAgent._complete_critique_coverage(critique, clusters)
+        by_title = {
+            review.article_title: review for review in normalized.placement_reviews
+        }
+
+        self.assertEqual(by_title[titles[0]].fit, "misassigned")
+        self.assertEqual(
+            by_title[titles[0]].recommended_cluster, "Candidate Audience 1"
+        )
+        self.assertEqual(by_title[titles[1]].fit, "noise")
+        self.assertEqual(by_title[titles[1]].recommended_cluster, "DROP")
+        self.assertEqual(by_title[titles[2]].recommended_cluster, "DROP")
+        self.assertEqual(by_title[titles[3]].fit, "weak")
+        self.assertEqual(by_title[titles[3]].recommended_cluster, "DROP")
+        self.assertEqual(by_title[titles[4]].recommended_cluster, "DROP")
+        self.assertTrue(normalized.needs_refinement)
+        self.assertIn(
+            titles[0],
+            [overlap.article_title for overlap in normalized.cross_cluster_overlaps],
+        )
+        AudienceAgent._validate_critique_coverage(
+            normalized, clusters, articles
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
