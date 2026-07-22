@@ -384,7 +384,8 @@ class AudienceAgent:
             )
         )
         critique = ClusterCritique.model_validate(result)
-        return self._scope_critique_to_candidates(critique, candidates)
+        critique = self._scope_critique_to_candidates(critique, candidates)
+        return self._complete_critique_coverage(critique, candidates)
 
     async def _refinement_pass(
         self,
@@ -604,6 +605,120 @@ Add a High/Medium/Low buying-power assessment with realistic brand categories. T
         return critique.model_copy(
             update={
                 "placement_reviews": reviews,
+                "cross_cluster_overlaps": overlaps,
+            }
+        )
+
+    @staticmethod
+    def _complete_critique_coverage(
+        critique: ClusterCritique, candidates: InitialClusterSet
+    ) -> ClusterCritique:
+        """Conservatively repair omitted or repeated critique assignments.
+
+        Structured output constrains each review's shape, but an LLM can still
+        omit an item from a variable-length list. A second critique call would
+        violate the pipeline's one-pass constraint. Instead, this guardrail
+        keeps one review per candidate assignment and converts every omission
+        into a weak ``DROP`` recommendation. Refinement can then proceed without
+        silently accepting an assignment that the critique never evaluated.
+        """
+
+        expected_in_order = list(
+            dict.fromkeys(
+                (cluster.cluster_name, title)
+                for cluster in candidates.clusters
+                for title in cluster.article_titles
+            )
+        )
+        expected = set(expected_in_order)
+
+        fit_priority = {"strong": 0, "weak": 1, "misassigned": 2, "noise": 3}
+        reviews_by_assignment: dict[tuple[str, str], ArticlePlacementReview] = {}
+        duplicate_review_count = 0
+        for review in critique.placement_reviews:
+            key = (review.assigned_cluster, review.article_title)
+            if key not in expected:
+                continue
+            current = reviews_by_assignment.get(key)
+            if current is None:
+                reviews_by_assignment[key] = review
+                continue
+            duplicate_review_count += 1
+            if fit_priority[review.fit] > fit_priority[current.fit]:
+                reviews_by_assignment[key] = review
+
+        missing = [key for key in expected_in_order if key not in reviews_by_assignment]
+        if duplicate_review_count:
+            LOGGER.warning(
+                "Collapsed %s repeated critique assignment reviews",
+                duplicate_review_count,
+            )
+        if missing:
+            LOGGER.warning(
+                "Critique omitted %s candidate assignments; conservatively marking "
+                "them weak with a DROP recommendation: %s",
+                len(missing),
+                missing,
+            )
+
+        for cluster_name, title in missing:
+            reviews_by_assignment[(cluster_name, title)] = ArticlePlacementReview(
+                article_title=title,
+                assigned_cluster=cluster_name,
+                fit="weak",
+                recommended_cluster="DROP",
+                reasoning=(
+                    "The critique omitted this required assignment review, so the "
+                    "placement is conservatively dropped instead of accepted without evidence."
+                ),
+            )
+
+        normalized_reviews = [
+            reviews_by_assignment[key] for key in expected_in_order
+        ]
+
+        assignments_by_title: dict[str, list[str]] = {}
+        for cluster_name, title in expected_in_order:
+            assignments_by_title.setdefault(title, []).append(cluster_name)
+
+        overlaps = list(critique.cross_cluster_overlaps)
+        overlap_titles = {overlap.article_title for overlap in overlaps}
+        for title, cluster_names in assignments_by_title.items():
+            if len(cluster_names) < 2 or title in overlap_titles:
+                continue
+            overlaps.append(
+                CrossClusterOverlap(
+                    article_title=title,
+                    current_cluster=cluster_names[0],
+                    competing_cluster=cluster_names[1],
+                    overlap_reason=(
+                        "The generation state assigned this article to more than one "
+                        "candidate audience, creating an exact cross-cluster overlap."
+                    ),
+                    recommended_resolution=(
+                        "Refinement must retain at most one evidence-supported placement "
+                        "and drop every competing assignment."
+                    ),
+                )
+            )
+
+        if not missing and not duplicate_review_count and len(overlaps) == len(
+            critique.cross_cluster_overlaps
+        ):
+            return critique
+
+        assessment = critique.overall_assessment
+        if missing:
+            assessment += (
+                f" A deterministic guardrail marked {len(missing)} omitted "
+                "assignment(s) weak and recommended DROP."
+            )
+
+        return critique.model_copy(
+            update={
+                "needs_refinement": True,
+                "overall_assessment": assessment,
+                "placement_reviews": normalized_reviews,
                 "cross_cluster_overlaps": overlaps,
             }
         )

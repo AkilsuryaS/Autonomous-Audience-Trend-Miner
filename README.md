@@ -18,23 +18,82 @@ The size percentages do not necessarily sum to 100%. The denominator includes th
 
 ## Architecture
 
-```text
-React frontend
-    │  WebSocket progress + REST result restoration
-    ▼
-FastAPI service
-    │  calls one deterministic async pipeline
-    ▼
-LangChain agent layer
-    │  one LangChain MCP tool invocation
-    ▼
-FastMCP Wikipedia service ─────► Wikimedia Pageviews API
-    │
-    └── returns normalized, aggregated article JSON
+```mermaid
+flowchart LR
+    subgraph Browser["Stakeholder browser"]
+        User["Brand marketer / reviewer"]
+        React["React dashboard<br/>Traffic ticker · Agent wire · Audience cards"]
+        User --> React
+    end
 
-Agent reasoning over returned JSON:
-generation → critique → refinement → Pydantic validation → portfolio generation
+    subgraph Container["Single Docker container"]
+        Nginx["Nginx :5173<br/>Static hosting + reverse proxy"]
+
+        subgraph Backend["FastAPI application"]
+            API["REST + WebSocket API :8000<br/>Lifecycle and progress streaming"]
+            State[("Latest trend snapshot<br/>and audience portfolio")]
+            API <--> State
+        end
+
+        subgraph Agent["LangChain audience agent"]
+            Fetch["1 · Fetch trends<br/>One genuine MCP tool call"]
+            Generate["2 · Generation<br/>5–10 candidate audiences"]
+            Critique["3 · Critique<br/>Placement and overlap audit"]
+            Guardrails["Deterministic guardrails<br/>Coverage · deduplication · safe DROP"]
+            Refine["4 · Refinement<br/>Apply critique exactly once"]
+            Validate["Pydantic validation<br/>Exact titles · unique placements"]
+            Portfolio["5 · Portfolio generation<br/>Names · briefs · size · buying power"]
+
+            Fetch --> Generate --> Critique --> Guardrails --> Refine --> Validate --> Portfolio
+        end
+
+        subgraph DataService["Decoupled MCP data service"]
+            MCPClient["Persistent MCP client<br/>Reused across runs"]
+            MCPServer["FastMCP Wikipedia server<br/>Spawned subprocess"]
+            Clean["Normalize titles · filter noise<br/>Sum 7 processed days"]
+
+            MCPClient <-->|"stdio transport"| MCPServer
+            MCPServer --> Clean
+        end
+
+        Nginx <-->|"REST + WebSocket proxy"| API
+        API --> Fetch
+        Fetch -->|"Invoke tool exactly once"| MCPClient
+        MCPClient -->|"Clean article JSON"| Generate
+        Portfolio -->|"Validated result"| API
+    end
+
+    Wikimedia[("Wikimedia Pageviews API<br/>Global English readership")]
+    OpenAI["OpenAI gpt-4o-mini<br/>Structured-output reasoning"]
+
+    Nginx -->|"HTML · CSS · JavaScript"| React
+    React -->|"GET /api/* · WS /ws/run"| Nginx
+    Nginx -->|"Live progress + portfolio JSON"| React
+
+    Clean <-->|"7 daily HTTPS requests<br/>with a 3-day lag buffer"| Wikimedia
+    Generate -.->|"Structured LLM call"| OpenAI
+    Critique -.->|"Structured LLM call"| OpenAI
+    Refine -.->|"Structured LLM call"| OpenAI
+    Portfolio -.->|"Structured LLM call"| OpenAI
+
+    classDef ui fill:#fff4df,stroke:#c47a16,color:#2b2118;
+    classDef service fill:#e8f2ff,stroke:#3973ac,color:#17212b;
+    classDef agent fill:#eee9ff,stroke:#7559b8,color:#211b30;
+    classDef data fill:#e7f7ed,stroke:#3a8b5d,color:#17271d;
+    classDef external fill:#f5f5f5,stroke:#6b7280,color:#1f2937;
+
+    class User,React ui;
+    class Nginx,API,State service;
+    class Fetch,Generate,Critique,Guardrails,Refine,Validate,Portfolio agent;
+    class MCPClient,MCPServer,Clean data;
+    class Wikimedia,OpenAI external;
 ```
+
+In short: the browser starts one WebSocket-driven run; FastAPI invokes the
+Wikipedia MCP tool once; the MCP server independently fetches and cleans public
+traffic data; and the agent transforms that JSON through a bounded
+generation → critique → refinement → validation → portfolio pipeline. Only the
+validated portfolio and live progress events return to the dashboard.
 
 The separation is deliberate:
 
