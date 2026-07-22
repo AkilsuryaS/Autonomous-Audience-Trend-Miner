@@ -18,75 +18,77 @@ The size percentages do not necessarily sum to 100%. The denominator includes th
 
 ## Architecture
 
+### System view
+
+This view shows where each responsibility lives and which boundaries are
+network, LLM, or MCP boundaries.
+
 ```mermaid
-flowchart LR
-    subgraph Browser["Stakeholder browser"]
-        User["Brand marketer / reviewer"]
-        React["React dashboard<br/>Traffic ticker · Agent wire · Audience cards"]
-        User --> React
+%%{init: {"flowchart": {"nodeSpacing": 45, "rankSpacing": 55}, "themeVariables": {"fontSize": "20px"}}}%%
+flowchart TB
+    Browser["React dashboard<br/>Runs in the stakeholder's browser"]
+
+    subgraph Docker["Single Docker container"]
+        direction TB
+        Nginx["Nginx · Port 5173<br/>Serves React and proxies API traffic"]
+        API["FastAPI · Port 8000<br/>REST endpoints, WebSocket, run state"]
+        Agent["LangChain audience agent<br/>Bounded reasoning pipeline"]
+        MCP["FastMCP Wikipedia service<br/>Persistent stdio subprocess"]
+
+        Nginx <-->|"REST + WebSocket"| API
+        API -->|"Start run + stream progress"| Agent
+        Agent -->|"One MCP tool invocation"| MCP
     end
 
-    subgraph Container["Single Docker container"]
-        Nginx["Nginx :5173<br/>Static hosting + reverse proxy"]
+    Wikimedia["Wikimedia Pageviews API<br/>Global English readership"]
+    OpenAI["OpenAI gpt-4o-mini<br/>Structured JSON reasoning"]
 
-        subgraph Backend["FastAPI application"]
-            API["REST + WebSocket API :8000<br/>Lifecycle and progress streaming"]
-            State[("Latest trend snapshot<br/>and audience portfolio")]
-            API <--> State
-        end
+    Browser <-->|"HTML / CSS / JS<br/>REST + live WebSocket events"| Nginx
+    MCP <-->|"7 daily HTTPS requests<br/>3-day processing buffer"| Wikimedia
+    Agent <-->|"Generation, critique,<br/>refinement, portfolio"| OpenAI
 
-        subgraph Agent["LangChain audience agent"]
-            Fetch["1 · Fetch trends<br/>One genuine MCP tool call"]
-            Generate["2 · Generation<br/>5–10 candidate audiences"]
-            Critique["3 · Critique<br/>Placement and overlap audit"]
-            Guardrails["Deterministic guardrails<br/>Coverage · deduplication · safe DROP"]
-            Refine["4 · Refinement<br/>Apply critique exactly once"]
-            Validate["Pydantic validation<br/>Exact titles · unique placements"]
-            Portfolio["5 · Portfolio generation<br/>Names · briefs · size · buying power"]
+    classDef ui fill:#fff4df,stroke:#b86b0b,color:#20170f,stroke-width:2px;
+    classDef service fill:#e8f2ff,stroke:#3973ac,color:#15202b,stroke-width:2px;
+    classDef agent fill:#eee9ff,stroke:#7559b8,color:#211b30,stroke-width:2px;
+    classDef data fill:#e7f7ed,stroke:#3a8b5d,color:#17271d,stroke-width:2px;
+    classDef external fill:#f5f5f5,stroke:#6b7280,color:#1f2937,stroke-width:2px;
 
-            Fetch --> Generate --> Critique --> Guardrails --> Refine --> Validate --> Portfolio
-        end
-
-        subgraph DataService["Decoupled MCP data service"]
-            MCPClient["Persistent MCP client<br/>Reused across runs"]
-            MCPServer["FastMCP Wikipedia server<br/>Spawned subprocess"]
-            Clean["Normalize titles · filter noise<br/>Sum 7 processed days"]
-
-            MCPClient <-->|"stdio transport"| MCPServer
-            MCPServer --> Clean
-        end
-
-        Nginx <-->|"REST + WebSocket proxy"| API
-        API --> Fetch
-        Fetch -->|"Invoke tool exactly once"| MCPClient
-        MCPClient -->|"Clean article JSON"| Generate
-        Portfolio -->|"Validated result"| API
-    end
-
-    Wikimedia[("Wikimedia Pageviews API<br/>Global English readership")]
-    OpenAI["OpenAI gpt-4o-mini<br/>Structured-output reasoning"]
-
-    Nginx -->|"HTML · CSS · JavaScript"| React
-    React -->|"GET /api/* · WS /ws/run"| Nginx
-    Nginx -->|"Live progress + portfolio JSON"| React
-
-    Clean <-->|"7 daily HTTPS requests<br/>with a 3-day lag buffer"| Wikimedia
-    Generate -.->|"Structured LLM call"| OpenAI
-    Critique -.->|"Structured LLM call"| OpenAI
-    Refine -.->|"Structured LLM call"| OpenAI
-    Portfolio -.->|"Structured LLM call"| OpenAI
-
-    classDef ui fill:#fff4df,stroke:#c47a16,color:#2b2118;
-    classDef service fill:#e8f2ff,stroke:#3973ac,color:#17212b;
-    classDef agent fill:#eee9ff,stroke:#7559b8,color:#211b30;
-    classDef data fill:#e7f7ed,stroke:#3a8b5d,color:#17271d;
-    classDef external fill:#f5f5f5,stroke:#6b7280,color:#1f2937;
-
-    class User,React ui;
-    class Nginx,API,State service;
-    class Fetch,Generate,Critique,Guardrails,Refine,Validate,Portfolio agent;
-    class MCPClient,MCPServer,Clean data;
+    class Browser ui;
+    class Nginx,API service;
+    class Agent agent;
+    class MCP data;
     class Wikimedia,OpenAI external;
+```
+
+### What happens during one mining run
+
+This view expands the agent box above. It is intentionally vertical so every
+stage and label remains readable at normal GitHub zoom.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 35, "rankSpacing": 45}, "themeVariables": {"fontSize": "20px"}}}%%
+flowchart TB
+    Start["1 · User clicks Run the miner"]
+    Fetch["2 · Fetch via MCP<br/>One tool call returns cleaned article JSON"]
+    Generate["3 · Generation LLM call<br/>Create 5–10 candidate audiences"]
+    Critique["4 · Critique LLM call<br/>Audit every placement and overlap"]
+    Guardrails["5 · Deterministic guardrails<br/>Fill missing reviews · deduplicate · safe DROP"]
+    Refine["6 · Refinement LLM call<br/>Merge, reassign, or remove topics exactly once"]
+    Validate["7 · Pydantic validation<br/>Exact titles · unique placements · complete rationale"]
+    Portfolio["8 · Portfolio LLM call<br/>Name · description · size index · buying power"]
+    Result["9 · Dashboard result<br/>Audience cards + source traffic signals"]
+
+    Start --> Fetch --> Generate --> Critique --> Guardrails --> Refine --> Validate --> Portfolio --> Result
+
+    classDef action fill:#fff4df,stroke:#b86b0b,color:#20170f,stroke-width:2px;
+    classDef llm fill:#eee9ff,stroke:#7559b8,color:#211b30,stroke-width:2px;
+    classDef control fill:#e8f2ff,stroke:#3973ac,color:#15202b,stroke-width:2px;
+    classDef output fill:#e7f7ed,stroke:#3a8b5d,color:#17271d,stroke-width:2px;
+
+    class Start action;
+    class Generate,Critique,Refine,Portfolio llm;
+    class Fetch,Guardrails,Validate control;
+    class Result output;
 ```
 
 In short: the browser starts one WebSocket-driven run; FastAPI invokes the
